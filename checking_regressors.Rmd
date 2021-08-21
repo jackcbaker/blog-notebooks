@@ -1,0 +1,83 @@
+---
+title: "Why regressors rarely help your forecast, and how to check if they do"
+author: "Jack Baker"
+date: "21/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Why you should think twice before including regressors in your forecasting models?
+
+For many data science models, the more regressors, the better your model accuracy will be. But forecasting is quite finickity, and this is often not the case.
+
+### Why is this? 
+
+We'll break this down into a few points.
+
+1. Let's imagine you want to forecast whether a coin will land heads or tails. That's going to be a non-starter. This is because the variable you're trying to forecast (let's call it the target), is completely random. Some targets just don't have any signal at all, or don't have any regressors that provide any signal.
+
+2. Let's call the observations of the variable you have already seen the actuals. These will often contain a surprising amount of information already. The forecasting algorithm you're using will be hell bent on picking up on this signal. Which means your regressor doesn't just have to be correlated with the target, it has to provide information that the actuals don't. This is much rarer. For example, ice cream sales will be correlated with the weather, but it definitely won't contain any more information than in the actuals.
+
+3. You either need to know your regressor ahead of time (it needs to be _forward facing_), or you need to forecast that regressor as well. Going back to the ice cream example, this regressor is not forward facing. So if you want to know the weather a week from now, you'll have to forecast ice cream sales ahead by a week, and then feed that into your forecasting algorithm. This adds a lot of noise to your regressor, which in turn adds noise to your forecast and makes it worse. It is rarely worth doing. 
+
+4. Even forward facing regressors frequently add unintended noise to your forecast, just because there is not enough signal, similar to points 1 and 2.
+
+
+# How to quickly check a regressor for a forecasting algorithm
+
+The best way to check if a regressor works for a given forecast is to run a full backtest with the regressor included, and not included. Then calculating the error metrics and seeing which one is best.
+
+A backtest is where you use your forecasting algorithm to forecast points you've _already seen_. Then you can compare how close the forecast was to the actual point you saw. [This tutorial](https://blog.exploratory.io/a-gentle-introduction-to-backtesting-for-evaluating-the-prophet-forecasting-models-66c132adc37c) provides an introduction to the backtest using Prophet.
+
+Backtests are expensive though, you often have more regressors to hand than you're willing to backtest.
+
+There's a quicker way to vet your regressors, then maybe you can choose the best ones to run a backtest on. The key is that we don't want to just check correlations, we want to check how good the regressor is after taking into account what the forecast has learned from actuals. This ensures that point 2 in the previous section is covered! 
+
+We can do this by feeding both the regressor and the forecast through a linear regression that is trying to learn the actuals. To assess how good the regressor is, we can examine whether the regressor is significant in the standard way you would assess a linear regression (i.e. check its p-value is sufficiently small). Because we have also included the forecast itself in the regression, this regression should account for what is already learned by the forecasting algorithm.
+
+Let's demo this practically. We'll do this in `R`. For all the packages used in this tutorial, download the [FPP3 package](https://mran.microsoft.com/snapshot/2020-10-09/web/packages/fpp3/index.html) by running in `R` `install.packages('fpp3')`. This package is a companion to the amazing [introductory forecasting book](https://otexts.com/fpp3/) by Rob Hyndman. 
+
+The data we'll use, is the US consumption expenditure data from the book. This is a time series of quarterly percentage changes of various measures in the US economy. The one we're interested in forecasting is economic production, which is a measure of the health of the US economy. It can be accessed after loading in `fpp3`, and is called `us_change`. The column we want to forecast is `Production`. Let's plot it
+```{r plot_actuals, message=F, warning=F}
+library(fpp3)
+
+us_change %>%
+    autoplot(Production) +
+    labs(y = "Production (% change)")
+```
+
+To forecast this data, we'll fit an [exponential smoothing model](https://otexts.com/fpp3/expsmooth.html) to this data with multiplicative trend and seasonality.
+
+To fit the regression on the regressors we need to check, we'll need to run a backtest on our forecasting algorithm. But we only have to do this once, with our current forecasting algorithm; rather than with every regressor. Often if you have past forecast values stored, you will not even have to do this.
+
+Let's backtest our forecasting model on the last 100 data points, and forecast one-step ahead.
+
+
+```{r backtest}
+backtest_size <- 100
+n <- nrow(us_change)
+backtest_results <- us_change[(n - (backtest_size - 1)):n,]
+backtest_results$forecast <- rep(NA, backtest_size)
+for (backtest_num in backtest_size:1) {
+    fit <- us_change[1:(n - backtest_num),] %>%
+        select(Production) %>%
+        model(
+            forecast = ETS(Production ~ error("A") + trend("A") + season("A"))
+        )
+    backtest_fc <- fit %>% forecast(h = 1)
+    backtest_results$forecast[backtest_num] <- backtest_fc$.mean
+}
+```
+
+Let's plot our backtest results against actuals
+```{r backtest_plot}
+backtest_results %>%
+    pivot_longer(c(Production, forecast), names_to = "Type") %>%
+    autoplot(value)
+```
+
+Notice that the forecast does well during normal times, but does not perform well during extreme events. It's possible that using the regressors in the dataset will help model this.
+
